@@ -53,5 +53,19 @@ executable canny
   -- other-modules:
 
   -- Other library packages from which modules are imported.
-  build-depends:       base ==4.5.*, directory >=1.2.0.1, convertible ==1.0.*,
+  build-depends:       base >=4.5.0.0, directory >=1.2.0.1, convertible ==1.0.*,
+                       repa ==3.2.*, repa-devil ==0.3.*
+
+executable canny-prof
+  -- .hs or .lhs file containing the Main module.
+  main-is:             canny.hs
+  ghc-options:         -Wall -Odph -rtsopts -threaded -fno-liberate-case
+                       -funfolding-use-threshold1000 -funfolding-keeness-factor1000
+                       -fllvm -optlo-O3 -prof -auto-all
+
+  -- Modules included in this executable, other than Main.
+  -- other-modules:
+
+  -- Other library packages from which modules are imported.
+  build-depends:       base >=4.5.0.0, directory >=1.2.0.1, convertible ==1.0.*,
                        repa ==3.2.*, repa-devil ==0.3.*
