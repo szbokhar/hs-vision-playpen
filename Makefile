@@ -9,4 +9,5 @@ dist:
 
 clean:
 	cabal clean
+	rm *.o *.hi
 	rm new-* *.prof

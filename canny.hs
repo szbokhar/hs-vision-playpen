@@ -1,7 +1,8 @@
-{-# LANGUAGE ViewPatterns #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE ViewPatterns,
+             FlexibleContexts,
+             FlexibleInstances,
+             MultiParamTypeClasses,
+             QuasiQuotes #-}
 
 module Main where
 
@@ -9,7 +10,8 @@ import Prelude                          as P
 
 import Data.Array.Repa                  as R
 import Data.Array.Repa.IO.DevIL
-import Data.Array.Repa.Repr.ForeignPtr ( )
+import Data.Array.Repa.Stencil
+import Data.Array.Repa.Stencil.Dim2
 import Data.Convertible
 
 import Control.Monad        ( when )
@@ -34,6 +36,7 @@ main = do
     when delete $ removeFile newFname
     runIL $ writeImage newFname img'
 
+
 -- |Runs the image algorithm
 manipulateImage :: Image -> IO Image
 manipulateImage img = do
@@ -52,30 +55,26 @@ manipulateImage img = do
     sep _ = undefined
 {-# NOINLINE manipulateImage #-}
 
+
 -- |Converts array to grayscale
 grey :: Array U DIM3 Word8 -> Array D DIM2 Word8
 grey img = img `deepSeqArray` img'
   where
-    img' = traverse img reduceShape (toGreyPixel)
-    reduceShape (listOfShape->[_,w,h]) = ix2 h w
-    reduceShape _ = undefined
-    toGreyPixel fn (Z :. y :. x) = word8
-                                 $ 0.2989*(float $ fn $ ix3 y x 0)
-                                 + 0.5870*(float $ fn $ ix3 y x 1)
-                                 + 0.1140*(float $ fn $ ix3 y x 2)
-    {-# INLINE reduceShape #-}
+    img' = traverse img (\(Z:.h:.w:._) -> ix2 h w) (toGreyPixel)
+    toGreyPixel fn (Z :. y :. x) = word8 (0.2989*r + 0.5870*g + 0.1140*b)
+      where [r,g,b] = P.map (float . fn . ix3 y x) [0,1,2]
     {-# INLINE toGreyPixel #-}
 {-# NOINLINE grey #-}
 
 -- Blurs a grayscale image
-greyBlur :: Int -> Int -> Float -> Array U DIM2 Word8 -> Array D DIM2 Word8
+greyBlur :: Int -> Int -> Float -> Array U DIM2 Word8 -> Array D DIM2 Int
 greyBlur kWidth kHeight sigma img = img `deepSeqArray` img'
   where
     img' = traverse img id (blur kWidth kHeight)
     (Z :. h :. w) = extent img
 
     blur kw kh fn (listOfShape->[x,y]) =
-        (word8 . sum) $ P.map (\(i,c) -> c * float (fn i)) (spots kw kh x y)
+        (int . sum) $ P.map (\(i,c) -> c * float (fn i)) (spots kw kh x y)
     blur _ _ _ _ = undefined
 
     spots kw kh x y = filter (inBounds w h . fst) normalized
@@ -89,40 +88,29 @@ greyBlur kWidth kHeight sigma img = img `deepSeqArray` img'
 {-# NOINLINE greyBlur #-}
 
 -- |Computes the gradient magnitude and direction
-gradient :: Array U DIM2 Word8 -> Array D DIM2 (Int, Int)
+gradient :: Array U DIM2 Int -> Array D DIM2 (Int, Int)
 gradient img = img `deepSeqArray` img'
   where
-    img' = traverse img id gMag
-    (Z :. h :. w) = extent img
+    img' = R.zipWith magAndDir mapX mapY
 
-    gMag fn (listOfShape->[x,y]) = (abs gX + abs gY, theta gY gX)
-      where vals = P.map (int . fn) (spots x y)
-            gX = (int . (`div` 2) . sum) $ P.zipWith (*) kX vals
-            gY = (int . (`div` 2) . sum) $ P.zipWith (*) kY vals
-    gMag _ _ = undefined
-
-    spots x y = filter (inBounds w h) factors
-      where factors = P.map (\(x',y') -> ix2 (y-y') (x-x'))
-                      [ (-1,-1), ( 0,-1), ( 1,-1)
-                      , (-1, 0), ( 0, 0), ( 1, 0)
-                      , (-1, 1), ( 0, 1), ( 1, 1) ]
+    magAndDir dx dy = (abs dx + abs dy, theta dx dy)
 
     theta (float->dy) (float->dx) = round(4*rad/pi) `mod` 4
         where rad | r < 0       = r+pi
                   | otherwise   = r
                 where r = atan2 dy dx
 
-    kX :: [Int]
-    kX = [ -1, 0, 1
-         , -2, 0, 2
-         , -1, 0, 1 ]
-    kY :: [Int]
-    kY = [ -1,-2,-1
-         ,  0, 0, 0
-         ,  1, 2, 1 ]
+    mapX = mapStencil2 (BoundConst 0) kX img
+    mapY = mapStencil2 (BoundConst 0) kY img
 
-    {-# INLINE gMag #-}
-    {-# INLINE spots #-}
+    kX = [stencil2| -1  0  1
+                    -2  0  2
+                    -1  0  1 |]
+    kY = [stencil2| -1 -2 -1
+                     0  0  0
+                     1  2  1 |]
+
+    {-# INLINE magAndDir #-}
     {-# INLINE theta #-}
     {-# INLINE kX #-}
     {-# INLINE kY #-}
@@ -136,9 +124,9 @@ nonMaximaSuppress img = img `deepSeqArray` img'
     (Z :. h :. w) = extent img
 
     suppress fn (listOfShape->[x,y])
-        | dir c == 0    = suppressPoint $ mag c > mag w  && mag c > mag e
+        | dir c == 0    = suppressPoint $ mag c > mag n  && mag c > mag s
         | dir c == 1    = suppressPoint $ mag c > mag nw && mag c > mag se
-        | dir c == 2    = suppressPoint $ mag c > mag n  && mag c > mag s
+        | dir c == 2    = suppressPoint $ mag c > mag w  && mag c > mag e
         | dir c == 3    = suppressPoint $ mag c > mag ne && mag c > mag sw
       where [nw,n,ne,w,c,e,sw,s,se] = spots x y
             mag = maybe 0 (fst . fn)
