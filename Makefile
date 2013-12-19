@@ -1,13 +1,11 @@
-build: dist
-	cabal build canny
+SHELL := /bin/zsh
 
-build-prof: dist
-	cabal build canny-prof
+build: dist
+	cabal build canny |& sed '/Loading package/d; /You are/d; /We will/d'
 
 dist:
 	cabal configure
 
 clean:
 	cabal clean
-	rm *.o *.hi
-	rm new-* *.prof
+	rm '*.o *.hi new-* *.prof'
