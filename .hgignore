@@ -8,4 +8,5 @@ doc/*
 dist/*
 .hsenv/*
 canny*
-
+.DS_Store
+new*
