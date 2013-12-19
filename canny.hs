@@ -6,11 +6,11 @@
 
 module Main where
 
-import Prelude                              as P
-import Data.Array.Repa                      as R
+import Prelude                  as P
+import Data.Array.Repa          as R
 
 import Control.Monad            ( when )
-import Control.Monad.ST         ( runST )
+import Control.Monad.ST         ( runST, ST )
 import Data.Array.Repa.Algorithms.Convolve
                                 ( convolveP )
 import Data.Array.Repa.IO.DevIL ( runIL, readImage, writeImage,
@@ -62,7 +62,7 @@ manipulateImage image = runST $ do
 grey :: Array U DIM3 Word8 -> Array D DIM2 Word8
 grey img = img `deepSeqArray` img'
   where
-    img' = traverse img (\(Z:.h:.w:._) -> ix2 h w) (toGreyPixel)
+    img' = traverse img (\(Z:.h:.w:._) -> ix2 h w) toGreyPixel
     toGreyPixel fn (Z :. y :. x) = word8 (0.2989*r + 0.5870*g + 0.1140*b)
       where [r,g,b] = P.map (float . fn . ix3 y x) [0,1,2]
     {-# INLINE toGreyPixel #-}
@@ -72,15 +72,15 @@ grey img = img `deepSeqArray` img'
 greyBlur :: Int -> Int -> Float -> Array U DIM2 Word8 -> Array D DIM2 Int
 greyBlur kW kH sigma img = img `deepSeqArray` (delay img')
   where
-    img' :: Array U DIM2 Int
     img' = runST $ do
-        stencil <- computeP $ fromFunction (ix2 3 3) (g 1)
+        stencil <- computeP $ fromFunction (ix2 3 3) (g sigma)
         imgFloat <- computeP $ R.map float img
         blur <- convolveP (const 0) stencil imgFloat
-        computeP $ R.map int blur
+        computeP $ R.map int blur :: ST a (Array U DIM2 Int)
 
     g sig (listOfShape->[x,y]) = gauss (x-(2*kW+1)) (y-(2*kH+1)) sig
     g _ _ = undefined
+    {-# INLINE g #-}
 {-# NOINLINE greyBlur #-}
 
 -- |Computes the gradient magnitude and direction
@@ -152,6 +152,7 @@ doubleThreshold img = img `deepSeqArray` img'
         | m > upper     = 255
         | m > lower     = 128
         | otherwise     = 0
+    {-# INLINE thresh' #-}
 
 -- |Simple gaussian function
 gauss :: (Convertible f1 Float, Convertible f2 Float) =>
@@ -159,12 +160,12 @@ gauss :: (Convertible f1 Float, Convertible f2 Float) =>
 gauss (float->a) (float->b) sig = exp $ (-a*a-b*b)/(2*sig*sig)
 {-# INLINE gauss #-}
 
-inBounds :: Shape sh => Int -> Int -> sh -> Bool
-inBounds w h (listOfShape->[x,y]) = x >= 0 && x < w && y >= 0 && y < h
-inBounds _ _ _ = undefined
+inBounds :: Int -> Int -> DIM2 -> Bool
+inBounds w h sh = inShape (ix2 h w) sh
 {-# INLINE inBounds #-}
 
 ------------------------- Conversion Functions --------------------------------
+instance Convertible a a where safeConvert = Right
 float :: Convertible a Float => a -> Float
 word8 :: Convertible a Word8 => a -> Word8
 int :: Convertible a Int => a -> Int
@@ -175,5 +176,3 @@ int = convert
 {-# INLINE float #-}
 {-# INLINE word8 #-}
 {-# INLINE int #-}
-
-instance Convertible a a where safeConvert = Right
