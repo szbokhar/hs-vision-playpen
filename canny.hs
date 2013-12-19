@@ -6,50 +6,52 @@
 
 module Main where
 
-import Prelude                          as P
+import Prelude                              as P
+import Data.Array.Repa                      as R
 
-import Data.Array.Repa                  as R
-import Data.Array.Repa.IO.DevIL
-import Data.Array.Repa.Stencil
+import Control.Monad            ( when )
+import Control.Monad.ST         ( runST )
+import Data.Array.Repa.Algorithms.Convolve
+                                ( convolveP )
+import Data.Array.Repa.IO.DevIL ( runIL, readImage, writeImage,
+                                  Image(RGB, RGBA, Grey) )
+import Data.Array.Repa.Stencil  ( Boundary(BoundConst) )
 import Data.Array.Repa.Stencil.Dim2
-import Data.Convertible
-
-import Control.Monad        ( when )
-import Data.Word
-import System.Directory     ( doesFileExist, removeFile )
-import System.Environment   ( getArgs )
-
-import Debug.Trace
+                                ( stencil2, makeStencil2, mapStencil2)
+import Data.Convertible         ( Convertible(safeConvert), convert )
+import Data.Word                ( Word8 )
+import System.Directory         ( doesFileExist, removeFile )
+import System.Environment       ( getArgs )
 
 -- |Main function
 main :: IO ()
 main = do
     -- Parse Arguments
-    [fname] <- getArgs
-    let newFname = "new-" P.++ fname
+    [filename] <- getArgs
+    let newFilename = "new-" P.++ filename
 
     -- Run algorithm
-    img' <- (runIL $ readImage fname) >>= manipulateImage
+    initialImage <- (runIL $ readImage filename)
+    let finalImage = manipulateImage initialImage
 
     -- Write new file
-    delete <- doesFileExist newFname
-    when delete $ removeFile newFname
-    runIL $ writeImage newFname img'
+    delete <- doesFileExist newFilename
+    when delete $ removeFile newFilename
+    runIL $ writeImage newFilename finalImage
 
 
 -- |Runs the image algorithm
-manipulateImage :: Image -> IO Image
-manipulateImage img = do
-    img' <- computeP (delay imgA)               -- Prepare image
+manipulateImage :: Image -> Image
+manipulateImage image = runST $ do
+    finalArray <- computeP (delay imageArray)   -- Prepare image
         >>= (computeP . grey)                   -- To Grayscale
         >>= (computeP . greyBlur 1 1 2)         -- Blur
-        >>= (computeP . gradient)
-        >>= (computeP . nonMaximaSuppress)
-        >>= (computeP . doubleThreshold)
-        -- >>= (computeP . R.map (word8 . fst))
-    return (Grey img')
+        >>= (computeP . gradient)               -- Gradient Mag and Dir
+        >>= (computeP . nonMaximaSuppress)      -- Thin Edges
+        >>= (computeP . doubleThreshold)        -- Draw good edges
+    return (Grey finalArray)
   where
-    (_,imgA) = sep img
+    (_,imageArray) = sep image
     sep (RGB x) = x `deepSeqArray` (RGB, x)
     sep (RGBA x) = (RGBA, x)
     sep _ = undefined
@@ -68,23 +70,17 @@ grey img = img `deepSeqArray` img'
 
 -- Blurs a grayscale image
 greyBlur :: Int -> Int -> Float -> Array U DIM2 Word8 -> Array D DIM2 Int
-greyBlur kWidth kHeight sigma img = img `deepSeqArray` img'
+greyBlur kW kH sigma img = img `deepSeqArray` (delay img')
   where
-    img' = traverse img id (blur kWidth kHeight)
-    (Z :. h :. w) = extent img
+    img' :: Array U DIM2 Int
+    img' = runST $ do
+        stencil <- computeP $ fromFunction (ix2 3 3) (g 1)
+        imgFloat <- computeP $ R.map float img
+        blur <- convolveP (const 0) stencil imgFloat
+        computeP $ R.map int blur
 
-    blur kw kh fn (listOfShape->[x,y]) =
-        (int . sum) $ P.map (\(i,c) -> c * float (fn i)) (spots kw kh x y)
-    blur _ _ _ _ = undefined
-
-    spots kw kh x y = filter (inBounds w h . fst) normalized
-      where factors = [ (ix2 (y-y') (x-x'), gauss x' y' sigma)
-                      | x' <- [-kw..kw], y' <- [-kh..kh]]
-            total = sum $ P.map snd factors
-            normalized = P.map (\(a,b) -> (a,b/total)) factors
-
-    {-# INLINE blur #-}
-    {-# INLINE spots #-}
+    g sig (listOfShape->[x,y]) = gauss (x-(2*kW+1)) (y-(2*kH+1)) sig
+    g _ _ = undefined
 {-# NOINLINE greyBlur #-}
 
 -- |Computes the gradient magnitude and direction
@@ -94,7 +90,6 @@ gradient img = img `deepSeqArray` img'
     img' = R.zipWith magAndDir mapX mapY
 
     magAndDir dx dy = (abs dx + abs dy, theta dx dy)
-
     theta (float->dy) (float->dx) = round(4*rad/pi) `mod` 4
         where rad | r < 0       = r+pi
                   | otherwise   = r
@@ -102,7 +97,6 @@ gradient img = img `deepSeqArray` img'
 
     mapX = mapStencil2 (BoundConst 0) kX img
     mapY = mapStencil2 (BoundConst 0) kY img
-
     kX = [stencil2| -1  0  1
                     -2  0  2
                     -1  0  1 |]
@@ -121,7 +115,7 @@ nonMaximaSuppress :: Array U DIM2 (Int,Int) -> Array D DIM2 (Int, Int)
 nonMaximaSuppress img = img `deepSeqArray` img'
   where
     img' = traverse img id suppress
-    (Z :. h :. w) = extent img
+    (Z :. h' :. w') = extent img
 
     suppress fn (listOfShape->[x,y])
         | dir c == 0    = suppressPoint $ mag c > mag n  && mag c > mag s
@@ -141,7 +135,7 @@ nonMaximaSuppress img = img `deepSeqArray` img'
                       , (-1, 0), ( 0, 0), ( 1, 0)
                       , (-1, 1), ( 0, 1), ( 1, 1) ]
       where toMaybeIndex (x',y')
-                | inBounds w h idx  = Just idx
+                | inBounds w' h' idx  = Just idx
                 | otherwise         = Nothing
               where idx = ix2 (y-y') (x-x')
 
@@ -159,7 +153,7 @@ doubleThreshold img = img `deepSeqArray` img'
         | m > lower     = 128
         | otherwise     = 0
 
--- Simple gaussian function
+-- |Simple gaussian function
 gauss :: (Convertible f1 Float, Convertible f2 Float) =>
          f1 -> f2 -> Float -> Float
 gauss (float->a) (float->b) sig = exp $ (-a*a-b*b)/(2*sig*sig)
