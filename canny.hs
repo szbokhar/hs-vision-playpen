@@ -10,7 +10,7 @@ import Prelude                  as P
 import Data.Array.Repa          as R
 
 import Control.Monad            ( when )
-import Control.Monad.ST         ( runST, ST )
+import Control.Monad.ST         ( runST )
 import Data.Array.Repa.Algorithms.Convolve
                                 ( convolveP )
 import Data.Array.Repa.IO.DevIL ( runIL, readImage, writeImage,
@@ -31,7 +31,7 @@ main = do
     let newFilename = "new-" P.++ filename
 
     -- Run algorithm
-    initialImage <- (runIL $ readImage filename)
+    initialImage <- runIL $ readImage filename
     let finalImage = manipulateImage initialImage
 
     -- Write new file
@@ -52,7 +52,7 @@ manipulateImage image = runST $ do
     return (Grey finalArray)
   where
     (_,imageArray) = sep image
-    sep (RGB x) = x `deepSeqArray` (RGB, x)
+    sep (RGB x) = (RGB, x)
     sep (RGBA x) = (RGBA, x)
     sep _ = undefined
 {-# NOINLINE manipulateImage #-}
@@ -60,7 +60,7 @@ manipulateImage image = runST $ do
 
 -- |Converts array to grayscale
 grey :: Array U DIM3 Word8 -> Array D DIM2 Word8
-grey img = img `deepSeqArray` img'
+grey img = img'
   where
     img' = traverse img (\(Z:.h:.w:._) -> ix2 h w) toGreyPixel
     toGreyPixel fn (Z :. y :. x) = word8 (0.2989*r + 0.5870*g + 0.1140*b)
@@ -70,25 +70,23 @@ grey img = img `deepSeqArray` img'
 
 -- Blurs a grayscale image
 greyBlur :: Int -> Int -> Float -> Array U DIM2 Word8 -> Array D DIM2 Int
-greyBlur kW kH sigma img = img `deepSeqArray` (delay img')
+greyBlur kW kH sigma img = runST $ do
+    stencil <- computeP $ fromFunction (ix2 (2*kH+1) (2*kW+1)) (g sigma)
+    imgFloat <- computeP $ R.map float img
+    blur <- convolveP (const 0) stencil imgFloat
+    return (R.map int blur)
   where
-    img' = runST $ do
-        stencil <- computeP $ fromFunction (ix2 3 3) (g sigma)
-        imgFloat <- computeP $ R.map float img
-        blur <- convolveP (const 0) stencil imgFloat
-        computeP $ R.map int blur :: ST a (Array U DIM2 Int)
-
-    g sig (listOfShape->[x,y]) = gauss (x-(2*kW+1)) (y-(2*kH+1)) sig
+    g sig (listOfShape->[x,y]) = gauss sig (x-kW) (y-kH) / tot
     g _ _ = undefined
+    tot = sum [gauss sigma y' x' | y' <- [-kH..kH], x' <- [-kW..kW]]
     {-# INLINE g #-}
+    {-# INLINE tot #-}
 {-# NOINLINE greyBlur #-}
 
 -- |Computes the gradient magnitude and direction
 gradient :: Array U DIM2 Int -> Array D DIM2 (Int, Int)
-gradient img = img `deepSeqArray` img'
+gradient img = R.zipWith magAndDir mapX mapY
   where
-    img' = R.zipWith magAndDir mapX mapY
-
     magAndDir dx dy = (abs dx + abs dy, theta dx dy)
     theta (float->dy) (float->dx) = round(4*rad/pi) `mod` 4
         where rad | r < 0       = r+pi
@@ -96,10 +94,10 @@ gradient img = img `deepSeqArray` img'
                 where r = atan2 dy dx
 
     mapX = mapStencil2 (BoundConst 0) kX img
-    mapY = mapStencil2 (BoundConst 0) kY img
     kX = [stencil2| -1  0  1
                     -2  0  2
                     -1  0  1 |]
+    mapY = mapStencil2 (BoundConst 0) kY img
     kY = [stencil2| -1 -2 -1
                      0  0  0
                      1  2  1 |]
@@ -112,9 +110,8 @@ gradient img = img `deepSeqArray` img'
 
 -- |Computes the gradient magnitude and direction
 nonMaximaSuppress :: Array U DIM2 (Int,Int) -> Array D DIM2 (Int, Int)
-nonMaximaSuppress img = img `deepSeqArray` img'
+nonMaximaSuppress img = traverse img id suppress
   where
-    img' = traverse img id suppress
     (Z :. h' :. w') = extent img
 
     suppress fn (listOfShape->[x,y])
@@ -144,28 +141,27 @@ nonMaximaSuppress img = img `deepSeqArray` img'
 {-# NOINLINE nonMaximaSuppress #-}
 
 doubleThreshold :: Array U DIM2 (Int,Int) -> Array D DIM2 Word8
-doubleThreshold img = img `deepSeqArray` img'
+doubleThreshold img = R.map (thresh' 200 100) img
   where
-    img' = R.map (thresh' 200 100) img
-
     thresh' upper lower (m,_)
         | m > upper     = 255
         | m > lower     = 128
         | otherwise     = 0
-    {-# INLINE thresh' #-}
 
 -- |Simple gaussian function
 gauss :: (Convertible f1 Float, Convertible f2 Float) =>
-         f1 -> f2 -> Float -> Float
-gauss (float->a) (float->b) sig = exp $ (-a*a-b*b)/(2*sig*sig)
+         Float -> f1 -> f2 -> Float
+gauss sig (float->a) (float->b) = exp $ (-a*a-b*b)/(2*sig*sig)
 {-# INLINE gauss #-}
 
-inBounds :: Int -> Int -> DIM2 -> Bool
-inBounds w h sh = inShape (ix2 h w) sh
+inBounds :: Shape sh => Int -> Int -> sh -> Bool
+inBounds w h (listOfShape->[x,y]) = x >= 0 && x < w && y >= 0 && y < h
+inBounds _ _ _ = undefined
 {-# INLINE inBounds #-}
 
 ------------------------- Conversion Functions --------------------------------
 instance Convertible a a where safeConvert = Right
+
 float :: Convertible a Float => a -> Float
 word8 :: Convertible a Word8 => a -> Word8
 int :: Convertible a Int => a -> Int
