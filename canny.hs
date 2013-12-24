@@ -1,16 +1,12 @@
-{-# LANGUAGE ViewPatterns,
-             FlexibleContexts,
-             FlexibleInstances,
-             MultiParamTypeClasses,
-             QuasiQuotes #-}
-
 module Main where
 
-import Prelude                  as P
-import Data.Array.Repa          as R
+import qualified Data.Array.Repa                as R
+import qualified Data.Vector.Unboxed            as V
+import qualified Data.Vector.Unboxed.Mutable    as MV
 
-import Control.Monad            ( when )
+import Control.Monad            ( when, foldM )
 import Control.Monad.ST         ( runST )
+import Data.Array.Repa          ( DIM2, DIM3, D, U, Array, Z(..), (:.)(..), (!) )
 import Data.Array.Repa.Algorithms.Convolve
                                 ( convolveP )
 import Data.Array.Repa.IO.DevIL ( runIL, readImage, writeImage,
@@ -23,16 +19,20 @@ import Data.Word                ( Word8 )
 import System.Directory         ( doesFileExist, removeFile )
 import System.Environment       ( getArgs )
 
+import Debug.Trace
+
 -- |Main function
 main :: IO ()
 main = do
     -- Parse Arguments
-    [filename] <- getArgs
-    let newFilename = "new-" P.++ filename
+    [filename, blurX, blurY, blurSig, uThresh, lThresh] <- getArgs
+    let newFilename = "new-" ++ filename
 
     -- Run algorithm
     initialImage <- runIL $ readImage filename
-    let finalImage = manipulateImage initialImage
+    let blur = (read blurX, read blurY, read blurSig)
+        thresh = (read uThresh, read lThresh)
+        finalImage = manipulateImage blur thresh initialImage
 
     -- Write new file
     delete <- doesFileExist newFilename
@@ -41,14 +41,14 @@ main = do
 
 
 -- |Runs the image algorithm
-manipulateImage :: Image -> Image
-manipulateImage image = runST $ do
-    finalArray <- computeP (delay imageArray)   -- Prepare image
-        >>= (computeP . grey)                   -- To Grayscale
-        >>= (computeP . greyBlur 1 1 2)         -- Blur
-        >>= (computeP . gradient)               -- Gradient Mag and Dir
-        >>= (computeP . nonMaximaSuppress)      -- Thin Edges
-        >>= (computeP . doubleThreshold)        -- Draw good edges
+manipulateImage :: (Int, Int, Float) -> (Int, Int) -> Image -> Image
+manipulateImage (kW, kH, sig) (l,u) image = runST $ do
+    finalArray <- R.computeP (R.delay imageArray)       -- Prepare image
+        >>= (R.computeP . grey)                         -- To Grayscale
+        >>= (R.computeP . greyBlur kW kH sig)           -- Blur
+        >>= (R.computeP . gradient)                     -- Gradient Mag and Dir
+        >>= (R.computeP . nonMaximaSuppress)            -- Thin Edges
+        >>= (R.computeP . doubleThreshold l u)          -- Draw good edges
     return (Grey finalArray)
   where
     (_,imageArray) = sep image
@@ -62,45 +62,44 @@ manipulateImage image = runST $ do
 grey :: Array U DIM3 Word8 -> Array D DIM2 Word8
 grey img = img'
   where
-    img' = traverse img (\(Z:.h:.w:._) -> ix2 h w) toGreyPixel
+    img' = R.traverse img (\(Z:.h:.w:._) -> R.ix2 h w) toGreyPixel
     toGreyPixel fn (Z :. y :. x) = word8 (0.2989*r + 0.5870*g + 0.1140*b)
-      where [r,g,b] = P.map (float . fn . ix3 y x) [0,1,2]
+      where [r,g,b] = map (float . fn . R.ix3 y x) [0,1,2]
     {-# INLINE toGreyPixel #-}
 {-# NOINLINE grey #-}
 
 -- Blurs a grayscale image
 greyBlur :: Int -> Int -> Float -> Array U DIM2 Word8 -> Array D DIM2 Int
 greyBlur kW kH sigma img = runST $ do
-    stencil <- computeP $ fromFunction (ix2 (2*kH+1) (2*kW+1)) (g sigma)
-    imgFloat <- computeP $ R.map float img
+    stencil <- R.computeP $ R.fromFunction (R.ix2 (2*kH+1) (2*kW+1)) (g sigma)
+    imgFloat <- R.computeP $ R.map float img
     blur <- convolveP (const 0) stencil imgFloat
     return (R.map int blur)
   where
-    g sig (listOfShape->[x,y]) = gauss sig (x-kW) (y-kH) / tot
-    g _ _ = undefined
+    g sig (Z:.y:.x) = gauss sig (x-kW) (y-kH) / tot
     tot = sum [gauss sigma y' x' | y' <- [-kH..kH], x' <- [-kW..kW]]
     {-# INLINE g #-}
     {-# INLINE tot #-}
 {-# NOINLINE greyBlur #-}
 
 -- |Computes the gradient magnitude and direction
-gradient :: Array U DIM2 Int -> Array D DIM2 (Int, Int)
+gradient :: Array U DIM2 Int -> Array D DIM2 (Magnitude, Direction)
 gradient img = R.zipWith magAndDir mapX mapY
   where
     magAndDir dx dy = (abs dx + abs dy, theta dx dy)
     theta (float->dy) (float->dx) = round(4*rad/pi) `mod` 4
         where rad | r < 0       = r+pi
                   | otherwise   = r
-                where r = atan2 dy dx
+              r = atan2 dy dx
 
     mapX = mapStencil2 (BoundConst 0) kX img
-    kX = [stencil2| -1  0  1
-                    -2  0  2
-                    -1  0  1 |]
+    kX = [stencil2|  1  0 -1
+                     2  0 -2
+                     1  0 -1 |]
     mapY = mapStencil2 (BoundConst 0) kY img
-    kY = [stencil2| -1 -2 -1
+    kY = [stencil2|  1  2  1
                      0  0  0
-                     1  2  1 |]
+                    -1 -2 -1 |]
 
     {-# INLINE magAndDir #-}
     {-# INLINE theta #-}
@@ -109,44 +108,88 @@ gradient img = R.zipWith magAndDir mapX mapY
 {-# NOINLINE gradient #-}
 
 -- |Computes the gradient magnitude and direction
-nonMaximaSuppress :: Array U DIM2 (Int,Int) -> Array D DIM2 (Int, Int)
-nonMaximaSuppress img = traverse img id suppress
+nonMaximaSuppress :: Array U DIM2 (Magnitude, Direction)
+                  -> Array D DIM2 (Magnitude, Direction)
+nonMaximaSuppress img = R.traverse img id suppress
   where
-    (Z :. h' :. w') = extent img
+    (Z :. h' :. w') = R.extent img
 
-    suppress fn (listOfShape->[x,y])
-        | dir c == 0    = suppressPoint $ mag c > mag n  && mag c > mag s
-        | dir c == 1    = suppressPoint $ mag c > mag nw && mag c > mag se
-        | dir c == 2    = suppressPoint $ mag c > mag w  && mag c > mag e
-        | dir c == 3    = suppressPoint $ mag c > mag ne && mag c > mag sw
+    suppress :: (DIM2 -> (Int,Int)) -> DIM2 -> (Int, Int)
+    suppress fn (Z:.y:.x)
+        | dir c == _NS      = keepIfPeak n s
+        | dir c == _NWSE    = keepIfPeak nw se
+        | dir c == _WE      = keepIfPeak w e
+        | dir c == _SWNE    = keepIfPeak sw ne
       where [nw,n,ne,w,c,e,sw,s,se] = spots x y
             mag = maybe 0 (fst . fn)
             dir = maybe (error "This is wrong") (snd . fn)
-            suppressPoint False = (0,0)
-            suppressPoint True = (mag c, dir c)
-            {-# INLINE suppressPoint #-}
+            keepIfPeak p q
+                | mag c > mag p && mag c > mag q    = (mag c, dir c)
+                | otherwise                         = (0,0)
+            {-# INLINE keepIfPeak #-}
     suppress _ _ = undefined
 
-    spots x y = P.map toMaybeIndex
+    spots x y = map toMaybeIndex
                       [ (-1,-1), ( 0,-1), ( 1,-1)
                       , (-1, 0), ( 0, 0), ( 1, 0)
                       , (-1, 1), ( 0, 1), ( 1, 1) ]
       where toMaybeIndex (x',y')
                 | inBounds w' h' idx  = Just idx
                 | otherwise         = Nothing
-              where idx = ix2 (y-y') (x-x')
+              where idx = R.ix2 (y-y') (x-x')
 
     {-# INLINE suppress #-}
     {-# INLINE spots #-}
 {-# NOINLINE nonMaximaSuppress #-}
 
-doubleThreshold :: Array U DIM2 (Int,Int) -> Array D DIM2 Word8
-doubleThreshold img = R.map (thresh' 200 100) img
+-- |Apply double thresholding on image. Only keep strong edges (>upper)
+--  and weak edges (>lower) if they are connected to a strong edge.
+doubleThreshold :: Int -> Int -> Array U DIM2 (Magnitude,Direction)
+                -> Array D DIM2 Word8
+doubleThreshold upper lower img = R.delay $ R.fromUnboxed imageSize finalVector
   where
-    thresh' upper lower (m,_)
-        | m > upper     = 255
-        | m > lower     = 128
-        | otherwise     = 0
+    finalVector = runST $ do
+        mVector <- MV.replicate (R.size imageSize) 0    -- Black image vector
+        floodWeakEdges mVector (strongEdgePositions img)-- Fill in true edges
+        V.freeze mVector                                -- return edges image
+
+    -- DFS from all strong edges to find connected weak edges. Use a stack
+    -- of pixels to consider
+    floodWeakEdges vec [] = return ()
+    floodWeakEdges vec ((x,y):xs) = do
+        MV.write vec (pixelAt x y) 255  -- Paint pixel at top of stack white
+
+        -- Get all weak edge neighbours
+        top <- foldM (\ys pos@(x',y') -> do
+            let (mag,_) = img ! R.ix2 y' x'     -- Gradient magnitude at pos
+            pixel <- MV.read vec (pixelAt x' y')-- Current pixel color
+            if weakEdge mag && notWhite pixel
+                then return (pos:ys)
+                else return ys
+            ) [] adjacentCells
+
+        -- Recurse with weak neighbours pushed onto stack
+        floodWeakEdges vec (top++xs)
+        return ()
+      where weakEdge val = upper > val && val > lower
+            notWhite = (/=255)
+            adjacentCells = [(x',y')
+                | x'<-[x-1..x+1], y'<-[y-1..y+1]    -- Surrounding positions
+                , R.inShape imageSize (Z:.y':.x)    -- Not out of bounds
+                , (x,y) /= (x',y')]                 -- Not the center
+
+    -- List of positions of all strong edges
+    strongEdgePositions image = [ i | (i,(gMag,_)) <- pixelList, gMag > upper]
+      where pixelList = V.toList . V.imap setToIndex . R.toUnboxed $ image
+            setToIndex i e = ((x,y),e)
+              where (Z :. y :. x) = R.fromIndex imageSize i
+
+    imageSize = R.extent img
+    pixelAt x y = R.toIndex imageSize $ R.ix2 y x
+    {-# INLINE imageSize #-}
+    {-# INLINE pixelAt #-}
+{-# NOINLINE doubleThreshold #-}
+
 
 -- |Simple gaussian function
 gauss :: (Convertible f1 Float, Convertible f2 Float) =>
@@ -154,10 +197,17 @@ gauss :: (Convertible f1 Float, Convertible f2 Float) =>
 gauss sig (float->a) (float->b) = exp $ (-a*a-b*b)/(2*sig*sig)
 {-# INLINE gauss #-}
 
-inBounds :: Shape sh => Int -> Int -> sh -> Bool
-inBounds w h (listOfShape->[x,y]) = x >= 0 && x < w && y >= 0 && y < h
-inBounds _ _ _ = undefined
+inBounds :: Int -> Int -> DIM2 -> Bool
+inBounds w h = R.inShape (R.ix2 h w)
 {-# INLINE inBounds #-}
+
+
+---------------------------- Useful Aliases -----------------------------------
+_NS, _NWSE, _WE, _SWNE :: Int
+(_NS, _NWSE, _WE, _SWNE) = (0,1,2,3)
+
+type Magnitude  = Int
+type Direction  = Int
 
 ------------------------- Conversion Functions --------------------------------
 instance Convertible a a where safeConvert = Right
