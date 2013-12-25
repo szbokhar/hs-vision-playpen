@@ -18,15 +18,30 @@ import Data.Convertible         ( Convertible(safeConvert), convert )
 import Data.Word                ( Word8 )
 import System.Directory         ( doesFileExist, removeFile )
 import System.Environment       ( getArgs )
+import System.Exit              ( exitFailure )
 
-import Debug.Trace
+-- |Usage Message
+usageMessage :: String
+usageMessage = "canny [fname] [kW] [kH] [kS] [u] [l]\n"
+            ++ "    fname   - Input filename\n"
+            ++ "    kW      - Blur kernel width\n"
+            ++ "    kH      - Blur kernel height\n"
+            ++ "    kS      - Blur kernel sigma\n"
+            ++ "    u       - Upper threshold\n"
+            ++ "    l       - Lower threshold\n"
+            ++ "\n"
+            ++ "Good default: ./canny file.jpg 1 1 2 300 200\n"
 
 -- |Main function
 main :: IO ()
 main = do
     -- Parse Arguments
+    args <- getArgs
+    when (length args /= 6) $ do
+        putStrLn usageMessage
+        exitFailure
     [filename, blurX, blurY, blurSig, uThresh, lThresh] <- getArgs
-    let newFilename = "new-" ++ filename
+    let newFilename = "edges-" ++ filename
 
     -- Run algorithm
     initialImage <- runIL $ readImage filename
@@ -155,7 +170,7 @@ doubleThreshold upper lower img = R.delay $ R.fromUnboxed imageSize finalVector
 
     -- DFS from all strong edges to find connected weak edges. Use a stack
     -- of pixels to consider
-    floodWeakEdges vec [] = return ()
+    floodWeakEdges _ [] = return ()
     floodWeakEdges vec ((x,y):xs) = do
         MV.write vec (pixelAt x y) 255  -- Paint pixel at top of stack white
 
