@@ -1,3 +1,8 @@
+{-# LANGUAGE ViewPatterns,
+             FlexibleInstances,
+             FlexibleContexts,
+             MultiParamTypeClasses,
+             QuasiQuotes #-}
 module Main where
 
 import qualified Data.Array.Repa                as R
@@ -15,38 +20,41 @@ import Data.Array.Repa.Stencil  ( Boundary(BoundConst) )
 import Data.Array.Repa.Stencil.Dim2
                                 ( stencil2, makeStencil2, mapStencil2)
 import Data.Convertible         ( Convertible(safeConvert), convert )
+import Data.List                ( intercalate )
 import Data.Word                ( Word8 )
 import System.Directory         ( doesFileExist, removeFile )
 import System.Environment       ( getArgs )
-import System.Exit              ( exitFailure )
+import System.Exit              ( exitFailure, exitSuccess )
 
 -- |Usage Message
 usageMessage :: String
-usageMessage = "canny [fname] [kW] [kH] [kS] [u] [l]\n"
+usageMessage = "canny fname [-i kW kH] [-s kS] [-t u l]\n"
             ++ "    fname   - Input filename\n"
-            ++ "    kW      - Blur kernel width\n"
-            ++ "    kH      - Blur kernel height\n"
-            ++ "    kS      - Blur kernel sigma\n"
-            ++ "    u       - Upper threshold\n"
-            ++ "    l       - Lower threshold\n"
-            ++ "\n"
-            ++ "Good default: ./canny file.jpg 1 1 2 300 200\n"
+            ++ "    kW      - Blur kernel width (default 1)\n"
+            ++ "    kH      - Blur kernel height (default 1)\n"
+            ++ "    kS      - Blur kernel sigma (default 2)\n"
+            ++ "    u       - Upper threshold (default 300)\n"
+            ++ "    l       - Lower threshold (default 200)\n"
 
 -- |Main function
 main :: IO ()
 main = do
     -- Parse Arguments
     args <- getArgs
-    when (length args /= 6) $ do
+    let (Opts file
+              (blurX,blurY) blurSig
+              (uThresh,lThresh)
+              help) = getOptions args
+        newFilename = generateNewFilename "edges-" file
+
+    when help $ do
         putStrLn usageMessage
-        exitFailure
-    [filename, blurX, blurY, blurSig, uThresh, lThresh] <- getArgs
-    let newFilename = "edges-" ++ filename
+        exitSuccess
 
     -- Run algorithm
-    initialImage <- runIL $ readImage filename
-    let blur = (read blurX, read blurY, read blurSig)
-        thresh = (read uThresh, read lThresh)
+    initialImage <- runIL $ readImage file
+    let blur = (blurX, blurY, blurSig)
+        thresh = (uThresh, lThresh)
         finalImage = manipulateImage blur thresh initialImage
 
     -- Write new file
@@ -206,15 +214,52 @@ doubleThreshold upper lower img = R.delay $ R.fromUnboxed imageSize finalVector
 {-# NOINLINE doubleThreshold #-}
 
 
+------------------------ Some Utility Functions -------------------------------
 -- |Simple gaussian function
 gauss :: (Convertible f1 Float, Convertible f2 Float) =>
          Float -> f1 -> f2 -> Float
 gauss sig (float->a) (float->b) = exp $ (-a*a-b*b)/(2*sig*sig)
 {-# INLINE gauss #-}
 
+-- |Check if a pair of indices are within bounds
 inBounds :: Int -> Int -> DIM2 -> Bool
 inBounds w h = R.inShape (R.ix2 h w)
 {-# INLINE inBounds #-}
+
+-- |Make a new filename by appending the prefix to the input filename
+generateNewFilename :: String -> String -> String
+generateNewFilename prefix filename = intercalate "/" $ path ++ [prefix ++ name]
+  where parts = foldr (\a (x:xs) -> if a == '/' then []:x:xs else (a:x):xs) [[]] filename
+        (path,name) = (init parts, last parts)
+
+
+--------------------------- Argument Parsing ----------------------------------
+data Options = Opts {
+    fname       :: String
+  , blurSize    :: (Int, Int)
+  , blurSigma   :: Float
+  , thresholds  :: (Int, Int)
+  , displayHelp :: Bool
+  }
+
+defaultOptions :: Options
+defaultOptions = Opts {
+    fname = error "Please specify an input image filename"
+  , blurSize = (1,1)
+  , blurSigma = 2
+  , thresholds = (300, 200)
+  , displayHelp = True
+  }
+
+getOptions :: [String] -> Options
+getOptions args = parse args defaultOptions
+  where
+    parse [] opts = opts
+    parse ("-h":xs) opts = parse xs $ opts { displayHelp = True }
+    parse ("-b":x:y:xs) opts = parse xs $ opts { blurSize = (read x, read y) }
+    parse ("-s":sig:xs) opts = parse xs $ opts { blurSigma = read sig }
+    parse ("-t":u:l:xs) opts = parse xs $ opts { thresholds = (read u, read l) }
+    parse (x:xs) opts = parse xs $ opts { fname = x, displayHelp = False }
 
 
 ---------------------------- Useful Aliases -----------------------------------
