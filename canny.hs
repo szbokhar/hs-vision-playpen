@@ -24,11 +24,13 @@ import Data.List                ( intercalate )
 import Data.Word                ( Word8 )
 import System.Directory         ( doesFileExist, removeFile )
 import System.Environment       ( getArgs )
-import System.Exit              ( exitFailure, exitSuccess )
+import System.Exit              ( exitSuccess )
+
+import Debug.Trace
 
 -- |Usage Message
 usageMessage :: String
-usageMessage = "canny fname [-i kW kH] [-s kS] [-t u l]\n"
+usageMessage = "canny fname [-b kW kH] [-s kS] [-t u l]\n"
             ++ "    fname   - Input filename\n"
             ++ "    kW      - Blur kernel width (default 1)\n"
             ++ "    kH      - Blur kernel height (default 1)\n"
@@ -93,6 +95,7 @@ grey img = img'
 
 -- Blurs a grayscale image
 greyBlur :: Int -> Int -> Float -> Array U DIM2 Word8 -> Array D DIM2 Int
+greyBlur 0 0 _ img = R.map int img
 greyBlur kW kH sigma img = runST $ do
     stencil <- R.computeP $ R.fromFunction (R.ix2 (2*kH+1) (2*kW+1)) (g sigma)
     imgFloat <- R.computeP $ R.map float img
@@ -198,7 +201,7 @@ doubleThreshold upper lower img = R.delay $ R.fromUnboxed imageSize finalVector
             notWhite = (/=255)
             adjacentCells = [(x',y')
                 | x'<-[x-1..x+1], y'<-[y-1..y+1]    -- Surrounding positions
-                , R.inShape imageSize (Z:.y':.x)    -- Not out of bounds
+                , R.inShape imageSize (Z:.y':.x')    -- Not out of bounds
                 , (x,y) /= (x',y')]                 -- Not the center
 
     -- List of positions of all strong edges
@@ -259,6 +262,7 @@ getOptions args = parse args defaultOptions
     parse ("-b":x:y:xs) opts = parse xs $ opts { blurSize = (read x, read y) }
     parse ("-s":sig:xs) opts = parse xs $ opts { blurSigma = read sig }
     parse ("-t":u:l:xs) opts = parse xs $ opts { thresholds = (read u, read l) }
+    parse (o@('-':_):_) opts = error $ "Unrecognized option " ++ o
     parse (x:xs) opts = parse xs $ opts { fname = x, displayHelp = False }
 
 
