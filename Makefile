@@ -1,11 +1,17 @@
 SHELL := /bin/bash
 
-build: dist
+build-canny: dist
 	cabal build canny 2>&1 | sed '/Loading package/d; /You are/d; /We will/d'
+
+build-crop: dist
+	cabal build crop 2>&1 | sed '/Loading package/d; /You are/d; /We will/d'
 
 dist:
 	cabal configure
 
-clean:
+clean: clean-gen
 	cabal clean
-	rm *.o *.hi new-* *.prof
+	rm -f *.o *.hi new-* *.prof
+
+clean-gen:
+	rm -f images/edges-* images/back-*
